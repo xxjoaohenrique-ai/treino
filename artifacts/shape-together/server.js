@@ -1,7 +1,5 @@
 import 'dotenv/config';
 import express from 'express';
-import http from 'http';
-import { Server } from 'socket.io';
 import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -22,7 +20,9 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
-const COOKIE_SECURE = String(process.env.COOKIE_SECURE || 'false').toLowerCase() === 'true';
+const COOKIE_SECURE = process.env.COOKIE_SECURE === undefined
+  ? Boolean(process.env.VERCEL)
+  : String(process.env.COOKIE_SECURE).toLowerCase() === 'true';
 const AVATAR_BUCKET = 'avatars';
 const REQUIRED_TABLES = [
   'app_users',
@@ -35,23 +35,22 @@ const REQUIRED_TABLES = [
 const VALID_STATUS = new Set(['red','green','blue','orange']);
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
-  console.error('Shape Together: configure SUPABASE_URL e SUPABASE_ANON_KEY no ambiente do Replit.');
-  process.exit(1);
+  console.warn('Shape Together: SUPABASE_URL/SUPABASE_ANON_KEY ainda não foram configurados.');
 }
 
-const supabase = SUPABASE_SERVICE_ROLE_KEY
+const supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       auth: { persistSession: false, autoRefreshToken: false }
     })
   : null;
-const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false }
-});
-const DATABASE_SETUP_ERROR = 'A persistência no Supabase requer SUPABASE_SERVICE_ROLE_KEY nos Secrets do Replit.';
+const authClient = SUPABASE_URL && SUPABASE_ANON_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false }
+    })
+  : null;
+const DATABASE_SETUP_ERROR = 'O backend precisa das variáveis SUPABASE_URL, SUPABASE_ANON_KEY e SUPABASE_SERVICE_ROLE_KEY.';
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: false } });
 app.set('trust proxy', 1);
 app.use((req, _res, next) => {
   if (req.url === '/shape-together-api' || req.url.startsWith('/shape-together-api/')) {
@@ -238,16 +237,10 @@ async function groupIdForUser(userId) {
   const u = await getUserById(userId);
   return u?.active_group_id || null;
 }
-async function broadcastGroup(groupId) {
-  if (!groupId) return;
-  for (const s of io.sockets.sockets.values()) {
-    if (!s.userId) continue;
-    const gid = await groupIdForUser(s.userId).catch(() => null);
-    if (gid === groupId) {
-      const payload = await loadStateForUser(s.userId).catch(() => null);
-      if (payload) s.emit('state:update', payload);
-    }
-  }
+async function broadcastGroup(_groupId) {
+  // No Vercel não mantemos um servidor Socket.IO persistente.
+  // O cliente usa Supabase Realtime (e polling como fallback) para atualizar o estado.
+  return;
 }
 
 async function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
@@ -340,7 +333,7 @@ async function sessionUser(req, res) {
     }
   }
   if (shouldRefreshCookie) setSessionCookie(req, res, session);
-  return { id: appUser.id, kind: 'google', authUserId: authUser.id };
+  return { id: appUser.id, kind: 'google', authUserId: authUser.id, accessToken: session.accessToken, expiresAt: Number(session.expiresAt) || jwtExpiry(session.accessToken) };
 }
 async function requireAuth(req, res, next) {
   try {
@@ -361,7 +354,7 @@ function appOrigin(req) {
   return `${isReplitDomain ? 'https' : req.protocol}://${host}`;
 }
 
-const databaseRoutes = /^\/api\/(?:health|session|auth\/google-session|login|logout|state|day(?:\/[^/]+)?|settings|invite|group(?:\/join)?|levels)$/;
+const databaseRoutes = /^\/api\/(?:health|session|auth\/(?:google-session|realtime)|login|logout|state|day(?:\/[^/]+)?|settings|invite|group(?:\/join)?|levels)$/;
 app.use((req, res, next) => {
   if (!supabase && databaseRoutes.test(req.path)) {
     return res.status(503).json({ error: DATABASE_SETUP_ERROR });
@@ -411,21 +404,38 @@ app.get('/api/auth/providers', (_req, res) => res.json({
 }));
 
 app.get('/api/auth/config', (_req, res) => {
-  if (!SUPABASE_ANON_KEY) return res.status(503).json({ error: 'SUPABASE_ANON_KEY não configurada no servidor.' });
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return res.status(503).json({ error: 'Supabase ainda não foi configurado no servidor.' });
   res.json({ url: SUPABASE_URL, anonKey: SUPABASE_ANON_KEY });
 });
 
-app.get('/auth/google', async (req, res) => {
+app.get('/api/auth/realtime', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return res.status(503).json({ error: 'Supabase ainda não foi configurado no servidor.' });
+  try {
+    const session = await sessionUser(req, res);
+    if (!session) return res.status(401).json({ error: 'Faça login.' });
+    res.json({
+      url: SUPABASE_URL,
+      anonKey: SUPABASE_ANON_KEY,
+      accessToken: session.kind === 'google' ? session.accessToken : null,
+      expiresAt: session.kind === 'google' ? session.expiresAt : null,
+      mode: session.kind === 'google' ? 'realtime' : 'polling'
+    });
+  } catch {
+    res.status(503).json({ error: 'Não foi possível preparar a sincronização agora.' });
+  }
+});
+
+app.get('/api/auth/google', async (req, res) => {
   if (!SUPABASE_ANON_KEY || !supabase || SESSION_SECRET.length < 16) return res.redirect('/?auth_error=session_not_configured');
   const invite = String(req.query.invite || '').trim();
-  const redirectTo = `${appOrigin(req)}/auth/callback${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`;
+  const redirectTo = `${appOrigin(req)}/shape-together-api/auth/callback${invite ? `?invite=${encodeURIComponent(invite)}` : ''}`;
   const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false, flowType: 'implicit' } });
   const { data, error } = await client.auth.signInWithOAuth({ provider: 'google', options: { redirectTo, skipBrowserRedirect: true } });
   if (error || !data?.url) return res.redirect('/?auth_error=google_failed');
   res.redirect(data.url);
 });
 
-app.get('/auth/callback', (req, res) => {
+app.get('/api/auth/callback', (req, res) => {
   const invite = String(req.query.invite || '').trim();
   const qs = invite ? `?invite=${encodeURIComponent(invite)}` : '';
   res.send(`<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Shape Together</title></head><body><p>Concluindo login…</p><script>location.replace('/?auth_callback=1${qs.slice(1) ? '&' + qs.slice(1) : ''}'+location.hash)</script></body></html>`);
@@ -684,34 +694,8 @@ app.post('/api/levels', requireAuth, async (_req, res) => {
   res.json({ ok: true });
 });
 
-io.use(async (socket, next) => {
-  try {
-    const encoded = readSessionCookie(socket.handshake.headers.cookie || '');
-    const session = openSession(encoded, SESSION_SECRET);
-    if (!session) return next(new Error('unauthorized'));
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => console.info(`Shape Together online on port ${PORT}`));
+}
 
-    if (session.kind === 'google') {
-      if (!session.accessToken || Number(session.expiresAt) <= Math.floor(Date.now() / 1000)) {
-        return next(new Error('unauthorized'));
-      }
-      const { data, error } = await authClient.auth.getUser(session.accessToken);
-      if (error || data?.user?.id !== session.authUserId) return next(new Error('unauthorized'));
-    }
-
-    const user = await getUserById(session.appUserId);
-    if (!user || (session.kind === 'google' && user.auth_user_id !== session.authUserId)) {
-      return next(new Error('unauthorized'));
-    }
-    socket.userId = user.id;
-    next();
-  } catch {
-    next(new Error('unauthorized'));
-  }
-});
-
-io.on('connection', async socket => {
-  const payload = await loadStateForUser(socket.userId).catch(() => null);
-  if (payload) socket.emit('state:update', payload);
-});
-
-server.listen(PORT, () => console.info(`Shape Together online on port ${PORT}`));
+export default app;
