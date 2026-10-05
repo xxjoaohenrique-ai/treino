@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "echo \"Shape Together: frontend estático + API Express\"",
+  "rewrites": [
+    {
+      "source": "/shape-together-api/:path*",
+      "destination": "/api/:path*"
+    }
+  ],
+  "functions": {
+    "api/[...path].js": {
+      "maxDuration": 30
+    }
+  }
+}
