@@ -1,0 +1,66 @@
+name: Import project files
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: read
+
+jobs:
+  import:
+    if: github.event.issue.pull_request == null && github.event.comment.body == 'IMPORT_DONE'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild and extract source payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, re, urllib.request
+          repo = os.environ["REPO"]
+          issue = os.environ["ISSUE_NUMBER"]
+          token = os.environ["GH_TOKEN"]
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{repo}/issues/{issue}/comments?per_page=100",
+              headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+          )
+          with urllib.request.urlopen(req) as r:
+              comments = json.load(r)
+          chunks = []
+          for c in comments:
+              body = c.get("body") or ""
+              m = re.match(r"^CHUNK_(\d{3}):(.*)$", body, re.S)
+              if m:
+                  chunks.append((int(m.group(1)), m.group(2).strip()))
+          chunks.sort()
+          if not chunks:
+              raise SystemExit("No payload chunks found")
+          expected = list(range(len(chunks)))
+          actual = [n for n, _ in chunks]
+          if actual != expected:
+              raise SystemExit(f"Missing/out-of-order chunks: {actual}")
+          with open("/tmp/project.b64", "w", encoding="ascii") as f:
+              f.write("".join(data for _, data in chunks))
+          PY
+          base64 -d /tmp/project.b64 > /tmp/project.tar.gz
+          tar -xzf /tmp/project.tar.gz -C .
+          rm -f .upload-init
+          rm -f .github/workflows/import-project.yml
+
+      - name: Commit imported files
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Importa arquivos do projeto sem ZIP"
+          git push origin HEAD:main
