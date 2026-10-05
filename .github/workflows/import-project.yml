@@ -51,8 +51,8 @@ jobs:
           with open("/tmp/project.b64", "w", encoding="ascii") as f:
               f.write("".join(data for _, data in chunks))
           PY
-          base64 -d /tmp/project.b64 > /tmp/project.tar.gz
-          tar -xzf /tmp/project.tar.gz -C .
+          base64 -d /tmp/project.b64 > /tmp/project.tar.xz
+          tar -xJf /tmp/project.tar.xz -C .
           rm -f .upload-init
           rm -f .github/workflows/import-project.yml
 
