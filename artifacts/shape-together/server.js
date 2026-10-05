@@ -286,7 +286,7 @@ async function sessionUser(req, res) {
   let authUser = null;
   let shouldRefreshCookie = false;
   const expiry = Number(session.expiresAt) || jwtExpiry(session.accessToken);
-  if (expiry <= Math.floor(Date.now() / 1000) + 60) {
+  if (expiry <= Math.floor(Date.now() / 1000) + 300) {
     const { data, error } = await authClient.auth.refreshSession({ refresh_token: session.refreshToken });
     if (error) {
       if (authCredentialError(error)) {
