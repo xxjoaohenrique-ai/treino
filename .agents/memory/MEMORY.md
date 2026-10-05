@@ -1,0 +1,1 @@
+- [Shape Together — escopo](shape-together-scope.md) — preservar o projeto original, Supabase e Google OAuth; preview antes da publicação.

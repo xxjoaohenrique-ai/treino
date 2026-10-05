@@ -1,0 +1,33 @@
+kind = "web"
+previewPath = "/"
+title = "Shape Together"
+description = "The existing Shape Together app, imported with its original interface and workflows, ready to run in the Replit preview with Supabase persistence and Google sign-in."
+version = "1.0.0"
+id = "artifacts/shape-together"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19037
+
+[services.development]
+run = "pnpm --filter @workspace/shape-together run dev"
+
+[services.production]
+[services.production.build]
+args = ["pnpm", "--filter", "@workspace/shape-together", "run", "build"]
+
+[services.production.run]
+args = ["node", "artifacts/shape-together/server.js"]
+
+[services.production.run.env]
+PORT = "19037"
+NODE_ENV = "production"
+
+[services.production.health.startup]
+path = "/"
+
+[services.env]
+PORT = "19037"
+BASE_PATH = "/"
